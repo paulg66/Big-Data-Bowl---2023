@@ -36,7 +36,7 @@ main_df <- merge(main_df,plays, by = c('playId','gameId'))
 main_df <- merge(main_df,players, by = 'nflId')
 
 #Section 2 ----- Define Play Type
-#Only want to include regular drop backs, remove penalties, screens, designed roll outs, unknown, QB runs, blitzes
+#Only want to include regular drop backs, remove penalties, designed roll outs, unknown, QB runs
 main_df <- main_df[main_df$dropBackType != 'DESIGNED_RUN',]
 main_df <- main_df[main_df$dropBackType != 'DESIGNED_ROLLOUT_RIGHT',]
 main_df <- main_df[main_df$dropBackType != 'DESIGNED_ROLLOUT_LEFT',]
@@ -183,8 +183,7 @@ Pass_Blockers <- Pass_Blockers[order(Pass_Blockers$gameId,Pass_Blockers$playId,P
 
 #Add how many blockers to pass rush data
 #Count Blockers that are OL
-Blocker_Count_OL <- main_df[main_df$pff_role == 'Pass Block'  & main_df$pff_blockType == 'PP' &
-                              main_df$pff_positionLinedUp %in%c("LT","LG","C","RG","RT"),
+Blocker_Count_OL <- main_df[main_df$pff_role == 'Pass Block' & main_df$pff_positionLinedUp %in%c("LT","LG","C","RG","RT"),
                             c('gameId','playId','nflId', 'pff_nflIdBlockedPlayer')] %>% 
                             distinct() %>% group_by(gameId,playId, pff_nflIdBlockedPlayer) %>% summarise(Blockers = n())
 Blocker_Count_OL <- Blocker_Count_OL[complete.cases(Blocker_Count_OL$pff_nflIdBlockedPlayer),]
