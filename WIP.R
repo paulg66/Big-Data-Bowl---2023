@@ -7,6 +7,9 @@ library(readr)
 library(ggplot2)
 library(caret)
 library(pgirmess)
+library(xgboost)
+library(DiagrammeR)
+library(DataExplorer)
 
 #Load Data
 #plays <- read.csv("plays.csv")
@@ -222,7 +225,7 @@ hist(Pass_Rushers_Final$Percent_to_Pressure_Zone_per_s, breaks = 20)
 
 #Position / Team Breakdown
 #Does it work? Are the effects linear?
-#How am I defining succes? Other metrics to pair them up against
+#How am I defining success? Other metrics to pair them up against
 Pass_Rushers_Final %>% group_by(pff_hurry) %>% summarise(median(Percent_to_Pressure_Zone_per_s),n())
 Pass_Rushers_Final %>% group_by(pff_hit) %>% summarise(median(Percent_to_Pressure_Zone_per_s),n())
 Pass_Rushers_Final %>% group_by(pff_sack) %>% summarise(median(Percent_to_Pressure_Zone_per_s),n())
@@ -230,6 +233,45 @@ Pass_Rushers_Final %>% group_by(pff_sack) %>% summarise(median(Percent_to_Pressu
 Pass_Rushers_Final %>% group_by(passResult) %>% summarise(median(Percent_to_Pressure_Zone_per_s),n())
 Pass_Rushers_Final %>% group_by(pff_positionLinedUp) %>% summarise(median(Percent_to_Pressure_Zone_per_s),n())
 Pass_Blockers %>% group_by(pff_positionLinedUp) %>% summarise(median(Percent_to_Pressure_Zone_per_s),n())
+
+#Feature Selection
+Pass_Rushers_ML <- Pass_Rushers_Final[,c("playId","gameId","nflId","pff_positionLinedUp","Blockers_All","Blockers_OL",'is_play_action',"Percent_to_Pressure_Zone_per_s"),]
+Pass_Blockers_ML <- Pass_Blockers[,c("pff_positionLinedUp","Blockers_All","Blockers_OL","pff_blockType","Percent_to_Pressure_Zone_per_s"),]
+
+control <- rfeControl(functions = rfFuncs, # random forest
+                      method = "repeatedcv", # repeated cv
+                      repeats = 5, # number of repeats
+                      number = 3) # number of folds
+
+#Train & Test Set
+x <- Pass_Rushers_ML %>%
+  select(-Percent_to_Pressure_Zone_per_s) %>%
+  as.data.frame()
+
+# Target variable
+y <- Pass_Rushers_ML$Percent_to_Pressure_Zone_per_s
+
+# Training: 80%; Test: 20%
+set.seed(5675)
+inTrain <- createDataPartition(y, p = .80, list = FALSE)[,1]
+
+x_train <- x[ inTrain, ]
+x_test  <- x[-inTrain, ]
+
+y_train <- y[ inTrain]
+y_test  <- y[-inTrain]
+
+# RFE
+rfe_model <- rfe(x = x_train, 
+                   y = y_train, 
+                   sizes = c(1:4),
+                   rfeControl = control)
+
+# Print RFE results
+rfe_model
+predictors(rfe_model)
+
+ggplot(data = rfe_model, metric = "RMSE") + theme_bw()
 
 
 #Position Comparison
@@ -240,8 +282,6 @@ ggplot(subset(Pass_Rushers_Final, pff_positionLinedUp %in% names(pos_count[pos_c
 
 #What impacts a rusher's change of pressuring the QB
 #1. Number of Blockers
-Pass_Rushers_ML <- Pass_Rushers_Final[,c("pff_positionLinedUp","Blockers_OL","Blockers_All",'is_play_action',"Percent_to_Pressure_Zone_per_s"),]
-Pass_Blockers_ML <- Pass_Blockers[,c("pff_positionLinedUp","Blockers_OL","Blockers_All","pff_blockType","Percent_to_Pressure_Zone_per_s"),]
 control <- trainControl(method="repeatedcv", number=10, repeats=3)
 model <- train(Percent_to_Pressure_Zone_per_s~., data=Pass_Rushers_ML, method="lmStepAIC", preProcess="scale", trControl=control)
 importance <- varImp(model, scale=FALSE)
@@ -264,6 +304,53 @@ temp_test <- Pass_Blockers %>% group_by(nflId,team) %>% summarise(median = mean(
 temp_test <- temp_test[temp_test$`n()` >= 100,]
 temp_test <- merge(temp_test,players[,c('nflId','officialPosition','displayName')])
 temp_test <- temp_test[order(temp_test$median, decreasing = FALSE),]
+
+
+#Model Testing
+set.seed(99)
+control <- trainControl(method="repeatedcv", number=10, repeats=3)
+
+#Linear
+modelLinear <- train(Percent_to_Pressure_Zone_per_s ~ Blockers_All + is_play_action, data=Pass_Rushers_ML, method="lmStepAIC", preProcess="scale", trControl=control)
+#Random Forest
+modelRF <- train(Percent_to_Pressure_Zone_per_s ~ Blockers_All + is_play_action, data=Pass_Rushers_ML, method="rf", preProcess="scale", trControl=control)
+#Extreme Gradient Boost
+modelxgbTree <- train(Percent_to_Pressure_Zone_per_s ~ Blockers_All + is_play_action, data=Pass_Rushers_ML, method="xgbTree", preProcess="scale", trControl=control)
+modelxgbLinear <- train(Percent_to_Pressure_Zone_per_s ~ Blockers_All + is_play_action, data=Pass_Rushers_ML, method="xgbLinear", preProcess="scale", trControl=control)
+
+#Model Comparisons
+results <- resamples(list(Linear=modelLinear, Random_Forest=modelRF, xGBoostLinear = modelxgbLinear, xGBoostTree = modelxgbTree))
+summary(results)
+bwplot(results)
+dotplot(results)
+
+xgb.plot.multi.trees(model = modelxgbTree)
+
+#Join Modelled Data
+Pass_Rushers_RF <- data.frame(predict(modelRF))
+Pass_Rushers_Final$xPZs <- Pass_Rushers_RF$predict.modelRF
+Pass_Rushers_Final$dPZs <- Pass_Rushers_Final$Percent_to_Pressure_Zone_per_s - Pass_Rushers_Final$xPZs
+Pass_Rushers_Final <- merge(Pass_Rushers_Final,players[,c('nflId','displayName'),])
+
+Pass_Blockers <- merge(Pass_Blockers,Pass_Rushers_Final[,c('nflId','playId','gameId','dPZs')],
+                       by.x = c('playId','gameId','pff_nflIdBlockedPlayer'), by.y = c('playId','gameId','nflId'))
+Pass_Blockers <- merge(Pass_Blockers,players[,c('nflId','displayName'),])
+
+
+#Player & Team Outputs
+#Rushers
+Pass_Rushers_Rankings <- Pass_Rushers_Final %>% group_by(displayName,team) %>% 
+  summarise(sum_dPZs = sum(dPZs), rush_attempts = n(), median_dPZs = median(dPZs)) %>% arrange(desc(sum_dPZs))
+
+Team_Rush_Rankings <- Pass_Rushers_Final %>% group_by(team) %>% 
+  summarise(sum_dPZs = sum(dPZs), rush_attempts = n(), median_dPZs = median(dPZs)) %>% arrange(desc(sum_dPZs))
+
+#Blockers
+Pass_Blockers_Rankings <- Pass_Blockers %>% group_by(displayName,team,pff_positionLinedUp) %>% 
+  summarise(sum_dPZs = sum(dPZs), snaps = n(), median_dPZs = median(dPZs)) %>% filter(snaps > 50) %>% arrange(sum_dPZs)
+
+Team_Blockers_Rankings <- Pass_Blockers %>% group_by(team)  %>% 
+  summarise(sum_dPZs = sum(dPZs), snaps = n(), median_dPZs = median(dPZs)) %>% arrange(sum_dPZs)
 
 #Goal - Plot blocker, rusher and QB set point. Find a way to animate plot to show x & y over time
 ggplot() + geom_point(data = test_path, aes(frameId,y),colour = 'blue') + geom_point(data = test_path, aes(frameId,y_set_point),colour = 'green') + geom_point(data = rush_test, aes(frameId,y),colour = 'maroon')
